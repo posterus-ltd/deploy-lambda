@@ -4,15 +4,18 @@
   "description": "AWS lambda deploy github action",
   "main": "index.js",
   "dependencies": {
-    "@actions/core": "^1.10.1",
-    "@aws-sdk/client-lambda": "^3.716.0",
-    "@aws-sdk/client-s3": "^3.717.0"
+    "@actions/core": "^1.11.1",
+    "@aws-sdk/client-lambda": "^3.1078.0",
+    "@aws-sdk/client-s3": "^3.1078.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
-    "@vercel/ncc": "^0.38.1",
-    "eslint": "^9.17.0",
-    "globals": "^15.14.0"
+    "@eslint/js": "^10.0.1",
+    "@vercel/ncc": "^0.44.1",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0"
+  },
+  "overrides": {
+    "undici": "^6.27.0"
   },
   "scripts": {
     "build": "ncc build index.js --license licenses.txt",
