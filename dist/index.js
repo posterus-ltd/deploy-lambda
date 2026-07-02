@@ -43620,16 +43620,17 @@ const {
   LambdaClient,
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
+  waitUntilFunctionUpdatedV2,
 } = __nccwpck_require__(6584);
 const { S3Client, PutObjectCommand } = __nccwpck_require__(9250);
 
 async function run() {
-  // Get all parameters
+  // Get all parameters (mandatory ones fail fast via { required: true })
   const ZIP = core.getInput("ZIP");
-  const FUNCTION_NAME = core.getInput("FUNCTION_NAME");
-  const AWS_REGION = core.getInput("AWS_REGION");
-  const AWS_SECRET_ID = core.getInput("AWS_SECRET_ID");
-  const AWS_SECRET_KEY = core.getInput("AWS_SECRET_KEY");
+  const FUNCTION_NAME = core.getInput("FUNCTION_NAME", { required: true });
+  const AWS_REGION = core.getInput("AWS_REGION", { required: true });
+  const AWS_SECRET_ID = core.getInput("AWS_SECRET_ID", { required: true });
+  const AWS_SECRET_KEY = core.getInput("AWS_SECRET_KEY", { required: true });
   const RUNTIME = core.getInput("RUNTIME");
   const ROLE = core.getInput("ROLE");
   const HANDLER = core.getInput("HANDLER");
@@ -43642,105 +43643,116 @@ async function run() {
   const S3_KEY = core.getInput("S3_KEY");
   const IMAGE_URI = core.getInput("IMAGE_URI");
 
-  // Check mandatory params
-  if (!FUNCTION_NAME) {
-    throw "No FUNCTION_NAME provided!";
-  }
-  if (!AWS_REGION) {
-    throw "No AWS_REGION provided!";
-  }
-  if (!AWS_SECRET_ID) {
-    throw "No AWS_SECRET_ID provided!";
-  }
-  if (!AWS_SECRET_KEY) {
-    throw "No AWS_SECRET_KEY provided!";
-  }
   const awsIdentityProvider = () =>
     Promise.resolve({
       accessKeyId: AWS_SECRET_ID,
       secretAccessKey: AWS_SECRET_KEY,
     });
   const awsConfig = {
-    apiVersion: "2015-03-31",
     region: AWS_REGION,
     credentials: awsIdentityProvider,
-    maxRetries: 3,
-    sslEnabled: true,
-    logger: console,
+    maxAttempts: 4,
   };
   console.log(`Update ${FUNCTION_NAME} in ${AWS_REGION}.`);
 
-  const updateParams = {
-    FunctionName: FUNCTION_NAME,
-    Publish: true,
-  };
-  const updateParamIfPresent = (paramName, paramValue) => {
-    if (paramValue) {
-      updateParams[paramName] = paramValue;
-    }
-  };
+  const lambdaClient = new LambdaClient(awsConfig);
 
-  if (ZIP) {
-    updateParams["PackageType"] = "Zip";
-    const zipBuffer = readZip(`./${ZIP}`);
-    const uploadOverS3 = S3_BUCKET && S3_KEY;
-    if (uploadOverS3) {
-      console.log(`Upload to  ${S3_BUCKET} as ${S3_KEY}.`);
-      updateParams["S3Bucket"] = S3_BUCKET;
-      updateParams["S3Key"] = S3_KEY;
-      const uploadCommand = new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: S3_KEY,
-        Body: zipBuffer,
-      });
-      const s3Client = new S3Client(awsConfig);
-      const response = await s3Client.send(uploadCommand);
-      console.log(response);
-      updateParamIfPresent("S3ObjectVersion", response.VersionId);
-    } else {
-      console.log(`Direct upload.`);
-      updateParams["ZipFile"] = zipBuffer;
+  // Build the configuration update (UpdateFunctionConfiguration only accepts
+  // configuration fields — never code fields such as Architectures/ZipFile).
+  const configParams = { FunctionName: FUNCTION_NAME };
+  const setConfig = (name, value) => {
+    if (value !== undefined && value !== "") {
+      configParams[name] = value;
     }
-  }
-  if (IMAGE_URI) {
-    updateParams["PackageType"] = "Image";
-    updateParams["ImageUri"] = IMAGE_URI;
-  } else {
-    updateParamIfPresent("Runtime", RUNTIME);
-    updateParamIfPresent("Handler", HANDLER);
+  };
+  setConfig("Role", ROLE);
+  setConfig("Description", DESCRIPTION);
+  setConfig("Timeout", convertOptionalToNumber(TIMEOUT));
+  setConfig("MemorySize", convertOptionalToNumber(MEMORY_SIZE));
+  if (!IMAGE_URI) {
+    // Runtime/Handler/Environment are not valid for image-based functions.
+    setConfig("Runtime", RUNTIME);
+    setConfig("Handler", HANDLER);
     if (ENVIRONMENT) {
-      const Variables = JSON.parse(ENVIRONMENT);
-      updateParams["Environment"] = { Variables };
+      configParams["Environment"] = { Variables: JSON.parse(ENVIRONMENT) };
+    }
+  }
+  const hasConfigUpdate = Object.keys(configParams).length > 1;
+
+  // Build the code update (UpdateFunctionCode only accepts code fields).
+  let codeParams = null;
+  if (ZIP || IMAGE_URI) {
+    codeParams = { FunctionName: FUNCTION_NAME, Publish: true };
+    // Default to x86_64 when not specified. Note: this is applied on every
+    // code deploy, so an arm64 function must set ARCHITECTURES: arm64
+    // explicitly or it will be switched to x86_64.
+    codeParams["Architectures"] = splitOptional(ARCHITECTURES) || ["x86_64"];
+    if (IMAGE_URI) {
+      codeParams["ImageUri"] = IMAGE_URI;
+    } else {
+      const zipBuffer = readZip(`./${ZIP}`);
+      if (S3_BUCKET && S3_KEY) {
+        console.log(`Upload to ${S3_BUCKET} as ${S3_KEY}.`);
+        const s3Client = new S3Client(awsConfig);
+        const response = await s3Client.send(
+          new PutObjectCommand({
+            Bucket: S3_BUCKET,
+            Key: S3_KEY,
+            Body: zipBuffer,
+          })
+        );
+        codeParams["S3Bucket"] = S3_BUCKET;
+        codeParams["S3Key"] = S3_KEY;
+        if (response.VersionId) {
+          codeParams["S3ObjectVersion"] = response.VersionId;
+        }
+        console.log(
+          `Uploaded to S3${
+            response.VersionId ? ` (version ${response.VersionId})` : ""
+          }.`
+        );
+      } else {
+        console.log("Direct upload.");
+        codeParams["ZipFile"] = zipBuffer;
+      }
     }
   }
 
-  // add optional params
-  updateParamIfPresent("Role", ROLE);
-  updateParamIfPresent("Description", DESCRIPTION);
-  updateParamIfPresent("Timeout", convertOptionalToNumber(TIMEOUT));
-  updateParamIfPresent("MemorySize", convertOptionalToNumber(MEMORY_SIZE));
-  updateParamIfPresent(
-    "Architectures",
-    splitOptional(ARCHITECTURES) || ["x86_64"]
-  );
+  if (!hasConfigUpdate && !codeParams) {
+    throw new Error(
+      "Nothing to update: provide ZIP, IMAGE_URI, or at least one configuration input."
+    );
+  }
+
+  // https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/client/lambda/command/UpdateFunctionConfigurationCommand/
+  // Apply configuration first so a subsequently published code version
+  // snapshots the new configuration. AWS rejects overlapping updates with
+  // ResourceConflictException, so we wait for each change to settle.
+  if (hasConfigUpdate) {
+    console.log("Updating function configuration.");
+    const response = await lambdaClient.send(
+      new UpdateFunctionConfigurationCommand(configParams)
+    );
+    logLambdaResult(response);
+    await waitUntilFunctionUpdated(lambdaClient, FUNCTION_NAME);
+  }
 
   // https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/client/lambda/command/UpdateFunctionCodeCommand/
-  const updateCommand =
-    ZIP || IMAGE_URI
-      ? new UpdateFunctionCodeCommand(updateParams)
-      : new UpdateFunctionConfigurationCommand(updateParams);
-  const lambdaClient = new LambdaClient(awsConfig);
-  const response = await lambdaClient.send(updateCommand);
-  console.log(response);
+  if (codeParams) {
+    console.log("Updating function code.");
+    const response = await lambdaClient.send(
+      new UpdateFunctionCodeCommand(codeParams)
+    );
+    logLambdaResult(response);
+    await waitUntilFunctionUpdated(lambdaClient, FUNCTION_NAME);
+  }
 }
 
 (async function () {
   try {
     await run();
   } catch (error) {
-    console.log(error);
-    core.error(error.message);
-    core.setFailed(error.message);
+    core.setFailed(error instanceof Error ? error.message : String(error));
   }
 })();
 
@@ -43751,6 +43763,27 @@ function readZip(path) {
     core.debug("ZIP read into memory.");
   }
   return zipBuffer;
+}
+
+async function waitUntilFunctionUpdated(client, functionName) {
+  await waitUntilFunctionUpdatedV2(
+    { client, maxWaitTime: 300 },
+    { FunctionName: functionName }
+  );
+}
+
+// Log a curated summary instead of the raw response — the raw
+// UpdateFunctionConfiguration response echoes Environment.Variables in
+// plaintext, which would leak secrets into the workflow log.
+function logLambdaResult(response) {
+  console.log(
+    `Function ${response.FunctionName} — version ${response.Version}, ` +
+      `state ${response.State ?? "n/a"}, ` +
+      `lastUpdateStatus ${response.LastUpdateStatus ?? "n/a"}.`
+  );
+  if (response.FunctionArn) {
+    console.log(`ARN: ${response.FunctionArn}`);
+  }
 }
 
 function convertOptionalToNumber(it) {

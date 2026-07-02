@@ -53,8 +53,8 @@ name: Deploy AWS Lambda
 on:
   pull_request:
     types: [merged]
-      branches:
-        - main
+    branches:
+      - main
 
 jobs:
   deploy-lambda:
@@ -70,11 +70,11 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_SECRET_ID: ${{ secrets.AWS_SECRET_ID }}
           AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
-          RUNTIME: 'nodejs12.x'
+          RUNTIME: 'nodejs24.x'
           HANDLER: 'index.handler'
           DESCRIPTION: 'Example function description'
           MEMORY_SIZE: '128'
           TIMEOUT: '5'
-          ARCHITECTURES: 'x86-64'
+          ARCHITECTURES: 'x86_64'
           ENVIRONMENT: '{"VAR_NAME":"VAR_VALUE","EXAMPLE_NAME":"EXAMPLE_VALUE"}'
 ```
